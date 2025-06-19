@@ -3,11 +3,15 @@ import express from "express";
 import { ENV } from "./config/env.js";
 import {db} from "./config/db.js";
 import { favoritesTable } from "./db/schema.js";
+import{job} from "./config/cron.js";
+
+
+
 
 //consttant
 const app = express();
 const PORT = process.env.PORT || 8001;
-
+if(ENV.NODE_ENV==="production") job.start(); // Start the cron job every 14 minitue to keep the API active 
 
 app.use(express.json()); // Parse JSON bodies if it not added this line all post field was undefined
 
