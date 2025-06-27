@@ -15,6 +15,20 @@
       "when": 1750324857882,
       "tag": "0001_gorgeous_toxin",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1750445513873,
+      "tag": "0002_outgoing_marten_broadcloak",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1750470890390,
+      "tag": "0003_smiling_risque",
+      "breakpoints": true
     }
   ]
 }
