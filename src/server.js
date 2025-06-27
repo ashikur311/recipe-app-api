@@ -1,7 +1,9 @@
-// Import necessary modules and tables
 import express from "express";
 import { ENV } from "./config/env.js";
 import { db } from "./config/db.js";
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
 import {
   userInfoTable,
   shopTable,
@@ -14,22 +16,63 @@ import {
   shopCustomerTable,
   shopOwnerTable
 } from "../src/db/schema.js";
-import { eq, and, or, like, gt, lt } from "drizzle-orm";
+import { eq, and, or, like, gt, lt, count, sum } from "drizzle-orm";
 
 // Initialize Express
 const app = express();
 const PORT = process.env.PORT || 8001;
 
+// Configure Multer for file uploads
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = 'uploads/shop-images';
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1E9);
+    cb(null, file.fieldname + '-' + uniqueSuffix + path.extname(file.originalname));
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: { fileSize: 5 * 1024 * 1024 }, // 5MB limit
+  fileFilter: (req, file, cb) => {
+    const filetypes = /jpeg|jpg|png|gif/;
+    const mimetype = filetypes.test(file.mimetype);
+    const extname = filetypes.test(path.extname(file.originalname).toLowerCase());
+    
+    if (mimetype && extname) {
+      return cb(null, true);
+    }
+    cb(new Error('Only image files (jpeg, jpg, png, gif) are allowed!'));
+  }
+});
+
 // Middleware
 app.use(express.json());
+app.use('/uploads', express.static('uploads')); // Serve uploaded files
 
 // Health check
 app.get("/api/health", (req, res) => {
   res.status(200).json({ success: true });
 });
 
+// ------------------- IMAGE UPLOAD ENDPOINT -------------------
+app.post('/api/upload', upload.single('image'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No file uploaded' });
+  }
+  
+  const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.path.replace(/^uploads[\\/]/, '')}`;
+  res.status(201).json({ imageUrl });
+});
+
 // ------------------- USER ENDPOINTS -------------------
-//Insert New User
+// Insert New User
 app.post("/api/users", async (req, res) => {
   try {
     const { userId, username, image } = req.body;
@@ -50,7 +93,7 @@ app.post("/api/users", async (req, res) => {
   }
 });
 
-//Get User Info
+// Get User Info
 app.get("/api/users/:userId", async (req, res) => {
   try {
     const { userId } = req.params;
@@ -70,19 +113,24 @@ app.get("/api/users/:userId", async (req, res) => {
 });
 
 // ------------------- SHOP ENDPOINTS -------------------
-//Create New Shop With Owner ID
-app.post("/api/shops", async (req, res) => {
+// Create New Shop With Owner ID
+app.post("/api/shops", upload.single('shopImage'), async (req, res) => {
   try {
-    const { shopName, location, type, shopImage, ownerId } = req.body;
+    const { shopName, location, type, ownerId } = req.body;
     if (!shopName || !ownerId) {
       return res.status(400).json({ error: "shopName and ownerId are required" });
     }
     
+    let shopImageUrl = null;
+    if (req.file) {
+      shopImageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.path.replace(/^uploads[\\/]/, '')}`;
+    }
+
     const newShop = await db.insert(shopTable).values({
       shopName,
       location,
       type,
-      shopImage,
+      shopImage: shopImageUrl,
       ownerId
     }).returning();
     
@@ -99,13 +147,27 @@ app.post("/api/shops", async (req, res) => {
   }
 });
 
-
-//Get Shop information by receving Owner Id
-app.get("/api/shops/:ownerId", async (req, res) => {
+// Get all shops for a user
+app.get("/api/users/:userId/shops", async (req, res) => {
   try {
-    const { ownerId } = req.params; // Correctly destructure ownerId from params
+    const { userId } = req.params;
     
-    // Fetch shop by ownerId
+    const shops = await db.select()
+      .from(shopTable)
+      .where(eq(shopTable.ownerId, userId));
+    
+    res.status(200).json(shops);
+  } catch (error) {
+    console.error("Error fetching user shops:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+// Get Shop information by receiving Owner Id
+app.get("/api/shops/owner/:ownerId", async (req, res) => {
+  try {
+    const { ownerId } = req.params;
+    
     const shop = await db.select()
       .from(shopTable)
       .where(eq(shopTable.ownerId, ownerId));
@@ -114,8 +176,6 @@ app.get("/api/shops/:ownerId", async (req, res) => {
       return res.status(404).json({ error: "No shop found for this owner" });
     }
     
-    // Return the first shop (assuming one owner can have only one shop)
-    // If multiple shops are possible, you might want to return the array
     res.status(200).json(shop[0]);
   } catch (error) {
     console.error("Error fetching shop:", error);
@@ -123,9 +183,48 @@ app.get("/api/shops/:ownerId", async (req, res) => {
   }
 });
 
-// ------------------- PRODUCT ENDPOINTS -------------------
+// Get shop details by shop ID
+app.get("/api/shops/details/:shopId", async (req, res) => {
+  try {
+    const { shopId } = req.params;
+    
+    const shop = await db.select()
+      .from(shopTable)
+      .where(eq(shopTable.shopId, shopId));
+    
+    if (shop.length === 0) {
+      return res.status(404).json({ error: "Shop not found" });
+    }
+    
+    // Get additional stats for the shop
+    const [productCount] = await db.select({ count: count() })
+      .from(productTable)
+      .where(eq(productTable.shopId, shopId));
+    
+    const [saleCount] = await db.select({ count: count() })
+      .from(sellTable)
+      .where(eq(sellTable.shopId, shopId));
+    
+    const [totalRevenue] = await db.select({ sum: sum(sellTable.totalAmount) })
+      .from(sellTable)
+      .where(eq(sellTable.shopId, shopId));
+    
+    res.status(200).json({
+      ...shop[0],
+      stats: {
+        productCount: productCount?.count || 0,
+        saleCount: saleCount?.count || 0,
+        totalRevenue: totalRevenue?.sum || 0
+      }
+    });
+  } catch (error) {
+    console.error("Error fetching shop details:", error);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
 
-//Add new Products With the shopId
+// ------------------- PRODUCT ENDPOINTS -------------------
+// Add new Products With the shopId
 app.post("/api/products", async (req, res) => {
   try {
     const { shopId, name, price, quantity } = req.body;
@@ -147,8 +246,7 @@ app.post("/api/products", async (req, res) => {
   }
 });
 
-
-//Get Shpos Products Informations
+// Get Shops Products Informations
 app.get("/api/shops/:shopId/products", async (req, res) => {
   try {
     const { shopId } = req.params;
@@ -163,11 +261,7 @@ app.get("/api/shops/:shopId/products", async (req, res) => {
   }
 });
 
-
-
 // ------------------- CART ENDPOINTS -------------------
-
-
 app.post("/api/carts", async (req, res) => {
   try {
     const { customerId, productId, quantity } = req.body;
@@ -299,8 +393,6 @@ app.post("/api/sales", async (req, res) => {
   }
 });
 
-
-
 // ------------------- CUSTOMER ENDPOINTS -------------------
 app.post("/api/customers", async (req, res) => {
   try {
@@ -341,7 +433,21 @@ app.post("/api/expenses", async (req, res) => {
   }
 });
 
+// Error handling middleware for file uploads
+app.use((err, req, res, next) => {
+  if (err instanceof multer.MulterError) {
+    return res.status(400).json({ error: err.message });
+  } else if (err) {
+    return res.status(500).json({ error: err.message });
+  }
+  next();
+});
+
 // Start server
 app.listen(PORT, () => {
   console.log("Server is running on port:", PORT);
+  // Ensure uploads directory exists
+  if (!fs.existsSync('uploads')) {
+    fs.mkdirSync('uploads');
+  }
 });
