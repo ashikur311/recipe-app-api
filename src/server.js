@@ -183,42 +183,55 @@ app.get("/api/shops/owner/:ownerId", async (req, res) => {
   }
 });
 
-// Get shop details by shop ID
 app.get("/api/shops/details/:shopId", async (req, res) => {
   try {
     const { shopId } = req.params;
-    
-    const shop = await db.select()
+    const numericId = Number(shopId);
+
+    // 1) Load the shop
+    const [shopRow] = await db
+      .select()
       .from(shopTable)
-      .where(eq(shopTable.shopId, shopId));
-    
-    if (shop.length === 0) {
+      .where(eq(shopTable.shopId, numericId));
+
+    if (!shopRow) {
       return res.status(404).json({ error: "Shop not found" });
     }
-    
-    // Get additional stats for the shop
-    const [productCount] = await db.select({ count: count() })
+
+    // 2) Gather stats
+    const [{ count: productCount }] = await db
+      .select({ count: count() })
       .from(productTable)
-      .where(eq(productTable.shopId, shopId));
-    
-    const [saleCount] = await db.select({ count: count() })
+      .where(eq(productTable.shopId, numericId));
+
+    const [{ count: saleCount }] = await db
+      .select({ count: count() })
       .from(sellTable)
-      .where(eq(sellTable.shopId, shopId));
-    
-    const [totalRevenue] = await db.select({ sum: sum(sellTable.totalAmount) })
+      .where(eq(sellTable.shopId, numericId));
+
+    const [{ sum: totalRevenue }] = await db
+      .select({ sum: sum(sellTable.totalAmount) })
       .from(sellTable)
-      .where(eq(sellTable.shopId, shopId));
-    
-    res.status(200).json({
-      ...shop[0],
+      .where(eq(sellTable.shopId, numericId));
+
+    // 3) Fetch **all** products for this shop
+    const products = await db
+      .select()
+      .from(productTable)
+      .where(eq(productTable.shopId, numericId));
+
+    // 4) Return everything together
+    res.json({
+      ...shopRow,
       stats: {
-        productCount: productCount?.count || 0,
-        saleCount: saleCount?.count || 0,
-        totalRevenue: totalRevenue?.sum || 0
-      }
+        productCount: productCount ?? 0,
+        saleCount:    saleCount    ?? 0,
+        totalRevenue: totalRevenue ?? 0,
+      },
+      products,    // <— here’s the missing piece
     });
-  } catch (error) {
-    console.error("Error fetching shop details:", error);
+  } catch (err) {
+    console.error("Error fetching shop details:", err);
     res.status(500).json({ error: "Internal server error" });
   }
 });
