@@ -263,192 +263,176 @@ app.post('/api/products/shopId/:shopId', async (req, res) => {
 });
 
 
-// Get Shops Products Informations
-app.get("/api/shops/:shopId/products", async (req, res) => {
+
+
+app.post('/api/customers', async (req, res) => {
   try {
-    const { shopId } = req.params;
-    const products = await db.select()
-      .from(productTable)
-      .where(eq(productTable.shopId, shopId));
-    
-    res.status(200).json(products);
+    const { mobile } = req.body;
+    if (!mobile) {
+      return res.status(400).json({ error: 'Mobile number is required' });
+    }
+    const [newCustomer] = await db
+      .insert(customerTable)
+      .values({ mobile })
+      .returning();
+    res.status(201).json(newCustomer);
   } catch (error) {
-    console.error("Error fetching products:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error creating customer:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Link an existing customer to a shop
+app.post('/api/shops/:shopId/customers', async (req, res) => {
+  try {
+    const shopId = Number(req.params.shopId);
+    const { customerId } = req.body;
+    if (!customerId) {
+      return res.status(400).json({ error: 'customerId is required' });
+    }
+    await db.insert(shopCustomerTable).values({ shopId, customerId });
+    res.status(201).json({ shopId, customerId });
+  } catch (error) {
+    console.error('Error linking customer to shop:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Get all customers for a shop
+app.get('/api/shops/:shopId/customers', async (req, res) => {
+  try {
+    const shopId = Number(req.params.shopId);
+    const rows = await db
+      .select()
+      .from(customerTable)
+      .innerJoin(
+        shopCustomerTable,
+        eq(customerTable.customerId, shopCustomerTable.customerId)
+      )
+      .where(eq(shopCustomerTable.shopId, shopId));
+    // rows come back as { customerTable: { … }, shopCustomerTable: { … } }
+    const customers = rows.map(r => r.customerTable);
+    res.status(200).json(customers);
+  } catch (error) {
+    console.error('Error fetching shop customers:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
 // ------------------- CART ENDPOINTS -------------------
-app.post("/api/carts", async (req, res) => {
+
+// Add (or update) a product in a customer's cart
+app.post('/api/cart', async (req, res) => {
   try {
     const { customerId, productId, quantity } = req.body;
     if (!customerId || !productId || !quantity) {
-      return res.status(400).json({ error: "customerId, productId, and quantity are required" });
+      return res
+        .status(400)
+        .json({ error: 'customerId, productId and quantity are required' });
     }
-    // Get product price
-    const [product] = await db.select({ price: productTable.price })
+
+    // 1) get product price
+    const [product] = await db
+      .select()
       .from(productTable)
       .where(eq(productTable.productId, productId));
-    
     if (!product) {
-      return res.status(404).json({ error: "Product not found" });
+      return res.status(404).json({ error: 'Product not found' });
     }
-    
-    const subtotal = product.price * quantity;
-    
-    const newCartItem = await db.insert(cartTable).values({
-      customerId,
-      productId,
-      quantity,
-      subtotal,
-      total: subtotal // For single item, total = subtotal
-    }).returning();
-    
-    res.status(201).json(newCartItem[0]);
-  } catch (error) {
-    console.error("Error adding to cart:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
+    const subtotal = parseFloat(product.price) * quantity;
 
-app.get("/api/customers/:customerId/cart", async (req, res) => {
-  try {
-    const { customerId } = req.params;
-    const cartItems = await db.select()
+    // 2) compute running total for that cart
+    const [{ total = 0 }] = await db
+      .select({ total: sum(cartTable.subtotal) })
       .from(cartTable)
       .where(eq(cartTable.customerId, customerId));
-    
+
+    const newTotal = total + subtotal;
+
+    // 3) insert into cart
+    const [newEntry] = await db
+      .insert(cartTable)
+      .values({
+        customerId,
+        productId,
+        quantity,
+        subtotal,
+        total: newTotal,
+      })
+      .returning();
+
+    res.status(201).json(newEntry);
+  } catch (error) {
+    console.error('Error adding to cart:', error);
+    res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// Fetch a customer’s cart (with product info)
+app.get('/api/customers/:customerId/cart', async (req, res) => {
+  try {
+    const customerId = Number(req.params.customerId);
+    const rows = await db
+      .select()
+      .from(cartTable)
+      .innerJoin(
+        productTable,
+        eq(cartTable.productId, productTable.productId)
+      )
+      .where(eq(cartTable.customerId, customerId));
+
+    // flatten so each item has name, subtotal, etc.
+    const cartItems = rows.map(r => ({
+      cartId: r.cartTable.cartId,
+      productId: r.productTable.productId,
+      name: r.productTable.name,
+      quantity: r.cartTable.quantity,
+      subtotal: r.cartTable.subtotal,
+    }));
     res.status(200).json(cartItems);
   } catch (error) {
-    console.error("Error fetching cart:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error fetching cart:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// ------------------- ORDER ENDPOINTS -------------------
-app.post("/api/orders", async (req, res) => {
+// Confirm sale and clear the cart
+app.post('/api/sells', async (req, res) => {
   try {
-    const { shopId, productId, quantity } = req.body;
-    if (!shopId || !productId || !quantity) {
-      return res.status(400).json({ error: "shopId, productId, and quantity are required" });
+    const { customerId, shopId } = req.body;
+    if (!customerId || !shopId) {
+      return res
+        .status(400)
+        .json({ error: 'customerId and shopId are required' });
     }
-    
-    // Get product price
-    const [product] = await db.select({ price: productTable.price })
-      .from(productTable)
-      .where(eq(productTable.productId, productId));
-    
-    if (!product) {
-      return res.status(404).json({ error: "Product not found" });
-    }
-    
-    const totalAmount = product.price * quantity;
-    
-    const newOrder = await db.insert(orderTable).values({
-      shopId,
-      productId,
-      quantity,
-      totalAmount
-    }).returning();
-    
-    res.status(201).json(newOrder[0]);
-  } catch (error) {
-    console.error("Error creating order:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
 
-app.get("/api/shops/:shopId/orders", async (req, res) => {
-  try {
-    const { shopId } = req.params;
-    const { status } = req.query;
-    
-    let whereClause = eq(orderTable.shopId, shopId);
-    if (status) {
-      whereClause = and(whereClause, eq(orderTable.status, status));
-    }
-    
-    const orders = await db.select()
-      .from(orderTable)
-      .where(whereClause);
-    
-    res.status(200).json(orders);
-  } catch (error) {
-    console.error("Error fetching orders:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
-
-// ------------------- SALE ENDPOINTS -------------------
-app.post("/api/sales", async (req, res) => {
-  try {
-    const { cartId, shopId, customerId } = req.body;
-    if (!cartId || !shopId || !customerId) {
-      return res.status(400).json({ error: "cartId, shopId, and customerId are required" });
-    }
-    
-    // Get cart total
-    const [cart] = await db.select({ total: cartTable.total })
+    // 1) pull all cart items for this customer
+    const cartItems = await db
+      .select()
       .from(cartTable)
-      .where(eq(cartTable.cartId, cartId));
-    
-    if (!cart) {
-      return res.status(404).json({ error: "Cart not found" });
-    }
-    
-    const newSale = await db.insert(sellTable).values({
-      cartId,
-      shopId,
-      customerId,
-      totalAmount: cart.total
-    }).returning();
-    
-    res.status(201).json(newSale[0]);
+      .where(eq(cartTable.customerId, customerId));
+    const totalAmount = cartItems.reduce(
+      (sum, c) => sum + parseFloat(c.subtotal),
+      0
+    );
+
+    // 2) insert into sell
+    const [sale] = await db
+      .insert(sellTable)
+      .values({ customerId, shopId, totalAmount })
+      .returning();
+
+    // 3) clear out cart
+    await db.delete(cartTable).where(eq(cartTable.customerId, customerId));
+
+    res.status(201).json(sale);
   } catch (error) {
-    console.error("Error recording sale:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error confirming sale:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// ------------------- CUSTOMER ENDPOINTS -------------------
-app.post("/api/customers", async (req, res) => {
-  try {
-    const { mobile } = req.body;
-    if (!mobile) {
-      return res.status(400).json({ error: "Mobile number is required" });
-    }
-    
-    const newCustomer = await db.insert(customerTable).values({
-      mobile
-    }).returning();
-    
-    res.status(201).json(newCustomer[0]);
-  } catch (error) {
-    console.error("Error creating customer:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
 
-// ------------------- EXPENSE ENDPOINTS -------------------
-app.post("/api/expenses", async (req, res) => {
-  try {
-    const { shopId, amount, description } = req.body;
-    if (!shopId || !amount) {
-      return res.status(400).json({ error: "shopId and amount are required" });
-    }
-    
-    const newExpense = await db.insert(expenseTable).values({
-      shopId,
-      amount,
-      description
-    }).returning();
-    
-    res.status(201).json(newExpense[0]);
-  } catch (error) {
-    console.error("Error adding expense:", error);
-    res.status(500).json({ error: "Internal server error" });
-  }
-});
 
 // Error handling middleware for file uploads
 app.use((err, req, res, next) => {
