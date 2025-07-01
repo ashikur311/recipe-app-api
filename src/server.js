@@ -238,26 +238,30 @@ app.get("/api/shops/details/:shopId", async (req, res) => {
 
 // ------------------- PRODUCT ENDPOINTS -------------------
 // Add new Products With the shopId
-app.post("/api/products", async (req, res) => {
+app.post('/api/products/shopId/:shopId', async (req, res) => {
   try {
-    const { shopId, name, price, quantity } = req.body;
+    // pull shopId from the URL, fall back if someone also sent it in the body
+    const shopId = Number(req.params.shopId) || Number(req.body.shopId);
+    const { name, price, quantity } = req.body;
+
     if (!shopId || !name || !price) {
-      return res.status(400).json({ error: "shopId, name, and price are required" });
+      return res.status(400).json({ error: 'shopId, name, and price are required' });
     }
-    
+
     const newProduct = await db.insert(productTable).values({
       shopId,
       name,
       price,
-      quantity
+      quantity: quantity || 0,
     }).returning();
-    
+
     res.status(201).json(newProduct[0]);
   } catch (error) {
-    console.error("Error creating product:", error);
-    res.status(500).json({ error: "Internal server error" });
+    console.error('Error creating product:', error);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
+
 
 // Get Shops Products Informations
 app.get("/api/shops/:shopId/products", async (req, res) => {
